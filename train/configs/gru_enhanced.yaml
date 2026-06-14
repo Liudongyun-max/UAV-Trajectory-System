@@ -1,0 +1,44 @@
+# GRU Enhanced Configuration
+name: gru_enhanced
+
+# Model config
+model:
+  input_dim: 12
+  hidden_dim: 64
+  num_layers: 2
+  future_steps: 5
+  dropout: 0.2
+
+# Training config
+training:
+  batch_size: 32
+  learning_rate: 0.0005
+  epochs: 200
+  cls_weight: 1.0
+  reg_weight: 0.3
+  grad_clip: 1.0
+  patience: 20
+  num_workers: 4
+  pin_memory: true
+
+# Data config
+data:
+  root_dir: "F:/UAV Trajectory System/export/input"
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  split_by: episode_id
+  negative_ratio: 0.4
+  seq_len: 20
+  normalize: true
+
+# Export config
+export:
+  format: pth
+  input_dim: 12
+  seq_len: 20
+
+# Other
+seed: 42
+device: auto
+log_dir: logs

@@ -1,0 +1,25 @@
+# UAV Trajectory Training Dependencies
+
+# Core
+torch>=2.0.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Configuration
+pyyaml>=6.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# Optional: TensorBoard
+tensorboard>=2.13.0
+
+# Optional: ONNX export
+onnx>=1.14.0
+onnxruntime>=1.15.0
+
+# Optional: Feature smoothing
+scipy>=1.10.0
+
+# Testing
+pytest>=7.0.0
