@@ -1,16 +1,54 @@
 """
-独立特征追踪与对齐处理器 (tracker.py)
+智能特征多目标追踪与对齐处理器 (tracker.py)
+支持多目标轨迹维护、多轨去重消冲突、一阶指数平滑物理防抖以及基于 GRU 时序分类的噪点过滤
 """
 import numpy as np
 import cv2
 from scipy.signal import savgol_filter
-from scipy.spatial import KDTree
 from typing import Tuple, List, Optional, Dict
+
+
+class Track:
+    """
+    单个轨迹段对象，维护自身的历史缓存、生命周期、物理平滑状态以及分类预测结果
+    """
+    def __init__(self, track_id: int, first_pos: Tuple[float, float], w: float = 50.0, h: float = 50.0, conf: float = 1.0):
+        self.track_id = track_id
+        # 历史滑动窗口缓存，保存Dict元素：{'x', 'y', 'px', 'py', 'w', 'h', 'conf'}
+        # 'x', 'y' 代表理想坐标；'px', 'py' 代表物理显示像素坐标
+        self.history_buffer: List[Dict] = []
+        self.history_buffer.append({
+            'x': first_pos[0], 'y': first_pos[1],
+            'px': first_pos[0], 'py': first_pos[1],
+            'w': w, 'h': h, 'conf': conf
+        })
+        self.missing_frames = 0
+        self.is_uav = False
+        self.classification_prob = None
+        self.pred_coords = []
+        # 最近锁定的物理位置，用于静止死锁检测
+        self.locked_positions: List[Tuple[float, float]] = [first_pos]
+        self.invalid_dist_frames = 0
+        
+        # 新增一阶滑动滤波器平滑变量，用于物理防抖
+        self.smooth_px = first_pos[0]
+        self.smooth_py = first_pos[1]
+        self.smooth_w = w
+        self.smooth_h = h
+
+    def update_smooth_filter(self, px: float, py: float, w: float, h: float, alpha: float = 0.65):
+        """
+        一阶指数低通滤波： smooth = alpha * val + (1 - alpha) * smooth
+        """
+        self.smooth_px = alpha * px + (1.0 - alpha) * self.smooth_px
+        self.smooth_py = alpha * py + (1.0 - alpha) * self.smooth_py
+        self.smooth_w = alpha * w + (1.0 - alpha) * self.smooth_w
+        self.smooth_h = alpha * h + (1.0 - alpha) * self.smooth_h
 
 
 class FeatureTracker:
     """
-    智能特征追踪与对齐处理器 (双驱模式)
+    多目标智能特征追踪与对齐处理器 (双驱模式)
     """
     
     def __init__(
@@ -25,42 +63,32 @@ class FeatureTracker:
         self.smooth = smooth
         self.normalize = normalize
         
-        # 内部历史缓存列表，保存Dict元素：{'x', 'y', 'px', 'py', 'w', 'h', 'conf'}
-        self.history_buffer: List[Dict] = []
+        # 追踪字典：track_id -> Track 实例
+        self.tracks: Dict[int, Track] = {}
+        self.next_track_id = 1
         
-        # 系统平移对齐偏置量
+        # 系统平移对齐偏置量（基于绑定的主轨迹校准）
         self.last_valid_offset = (0.0, 0.0)
         self.offset_initialized = False
-        
-        # 连续距离跳跃超限帧数计数器 (用于纯视觉防死锁机制)
-        self.invalid_dist_frames = 0
-        # 记录最近锁定的目标坐标序列 (用于静止死锁检测)
-        self.locked_positions: List[Tuple[int, int]] = []
         
         # 偏置突变允许的最大跳跃门限 (像素)，用于过滤森林边缘等背景树木杂点污染
         self.max_offset_jump = 40.0
         # 纯视频模式下，单帧目标中心最大运动位移门限
         self.max_drone_move = 60.0
+        # 轨迹无匹配最大容忍帧数，超过该值则删除轨迹
+        self.max_missing_frames = 10
         
-    def detect_drone_centroid(self, frame: np.ndarray, last_pos: Optional[Tuple[int, int]] = None, thresh_val: int = 120) -> Optional[Tuple[int, int]]:
+    def detect_all_centroids(self, frame: np.ndarray, thresh_val: int = 120) -> List[Tuple[int, int, float, float, int]]:
         """
-        基于绝对灰度值反向二值化的检测层 (低于 thresh_val 设为白色前景)
+        基于绝对灰度值二值化的多目标检测层（含邻近连通域融合机制）
+        返回: List of (cX, cY, w, h, max_contrast)
         """
         height, width = frame.shape[:2]
         self.height, self.width = height, width
         
-        # 动态计算分辨率相关的缩放因子 (以仿真基准 1280x720 为参考)
-        scale_area = (width * height) / (1280.0 * 720.0)
-        scale_linear = np.sqrt(scale_area)
-        
-        # 过滤与定位限制
-        sky_height_limit = int(height * (1100.0 / 1440.0))
-        r_kdtree = 150.0 * scale_linear
-        current_max_drone_move = self.max_drone_move * scale_linear
-        
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # 1. 绝对灰度反向二值化处理 (低于 thresh_val 判定为白色前景)
+        # 1. 绝对灰度反向二值化处理
         _, thresh = cv2.threshold(gray, thresh_val, 255, cv2.THRESH_BINARY_INV)
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
@@ -69,248 +97,336 @@ class FeatureTracker:
         for c in contours:
             x, y, w, h = cv2.boundingRect(c)
             area = w * h
-            # 筛选依据：边界框面积 w * h 在 1 到 2000 像素之间
             if 1 <= area < 2000:
                 cX = int(x + w / 2.0)
                 cY = int(y + h / 2.0)
-                # 排除四周最外围 40px 的相机暗角与字符 UI 噪点
                 if border <= cX < width - border and border <= cY < height - border:
-                    # 分值以绝对暗度评估：120 - 局部最暗点
                     max_contrast = int(120 - np.min(gray[y:y+h, x:x+w]))
-                    centroids.append((cX, cY, area, max_contrast))
+                    centroids.append((cX, cY, float(w), float(h), max_contrast))
                     
-        if not centroids:
-            return None
-            
-        # 3. 多模式决策与追踪
-        if last_pos is not None:
-            # 追踪模式：直接在所有候选重心点 (centroids) 中寻找局域最近点 (不限孤立点)
-            best_candidate = None
-            min_dist = float('inf')
-            for p in centroids:
-                dist = np.hypot(p[0] - last_pos[0], p[1] - last_pos[1])
-                if dist < min_dist:
-                    min_dist = dist
-                    best_candidate = p
-            if min_dist < current_max_drone_move:
-                return (best_candidate[0], best_candidate[1])
-            return None
-        else:
-            # 检测/全局跳转模式：需进行空间邻域密度过滤 (KDTree 过滤地面群聚大楼/树梢噪点)
-            coords = np.array([[p[0], p[1]] for p in centroids])
-            tree = KDTree(coords)
-            counts = tree.query_ball_point(coords, r=r_kdtree, return_length=True)
-            neighbors = counts - 1 # 排除自身
-            
-            isolated_candidates = []
-            for i, p in enumerate(centroids):
-                if neighbors[i] < 4:
-                    isolated_candidates.append(p)
-                    
-            if not isolated_candidates:
-                return None
+        # 2. 检测点去重融合机制：物理间距小于 20px 的两个微小域融合成一个
+        if len(centroids) > 1:
+            merged = []
+            used = set()
+            for i in range(len(centroids)):
+                if i in used:
+                    continue
+                cX1, cY1, w1, h1, max_contrast1 = centroids[i]
                 
-            # 优先在天空区寻找最佳孤立点，天空候选点为空时直接返回 None，杜绝地面错误跳转
-            sky_candidates = [p for p in isolated_candidates if p[1] < sky_height_limit]
-            if sky_candidates:
-                best = max(sky_candidates, key=lambda x: x[2] * x[3])
-                return (best[0], best[1])
-            else:
-                return None
+                group = [centroids[i]]
+                used.add(i)
+                for j in range(i + 1, len(centroids)):
+                    if j in used:
+                        continue
+                    cX2, cY2, w2, h2, max_contrast2 = centroids[j]
+                    dist = np.hypot(cX1 - cX2, cY1 - cY2)
+                    if dist < 20.0:
+                        group.append(centroids[j])
+                        used.add(j)
+                        
+                if len(group) == 1:
+                    merged.append(centroids[i])
+                else:
+                    # 融合加权质心和包络框大小
+                    sum_x = sum(g[0] * (g[2] * g[3]) for g in group)
+                    sum_y = sum(g[1] * (g[2] * g[3]) for g in group)
+                    sum_area = sum(g[2] * g[3] for g in group)
+                    
+                    merged_cX = int(sum_x / (sum_area + 1e-8))
+                    merged_cY = int(sum_y / (sum_area + 1e-8))
+                    merged_w = max(g[2] for g in group)
+                    merged_h = max(g[3] for g in group)
+                    merged_contrast = max(g[4] for g in group)
+                    
+                    merged.append((merged_cX, merged_cY, merged_w, merged_h, merged_contrast))
+            centroids = merged
+            
+        return centroids
+
+    def _find_csv_bound_track_id(self, csv_row: Dict) -> Optional[int]:
+        """寻找与 CSV 给定坐标物理偏差最小的那个 Track ID 用于偏置校准"""
+        if not self.tracks:
+            return None
+        target_x = csv_row["x_center"] + self.last_valid_offset[0]
+        target_y = csv_row["y_center"] + self.last_valid_offset[1]
+        best_tid = None
+        min_dist = float('inf')
+        for tid, track in self.tracks.items():
+            last_pt = track.history_buffer[-1]
+            dist = np.hypot(last_pt['px'] - target_x, last_pt['py'] - target_y)
+            if dist < min_dist:
+                min_dist = dist
+                best_tid = tid
+        return best_tid
+
+    def _is_closest_to_csv(self, track: Track, csv_row: Dict) -> bool:
+        bound_id = self._find_csv_bound_track_id(csv_row)
+        return bound_id == track.track_id
 
     def update(self, frame: np.ndarray, csv_row: Optional[Dict] = None) -> Tuple[Optional[Tuple[int, int]], Tuple[float, float], bool]:
         """
-        根据当前帧更新滑动窗口：
-        - 若 csv_row 存在：数据驱动模式 (含闭环偏置修正)
-        - 若 csv_row 为空：纯视频驱动模式 (基于图像分割追踪)
+        根据当前帧更新多目标追踪历史滑动窗口
         
-        返回:
-            drone_pos: 无人机在当前帧的实际显示中心像素 (x, y)，丢失时为 None
-            offset: 坐标系的校正偏移量
-            is_valid: 滑动历史是否填满 seq_len 帧以进行网络预测
+        返回 (兼容单目标接口的输出):
+            drone_pos: 主无人机当前帧的显示中心 (x, y)，丢失时为 None
+            offset: 主校正偏移量
+            is_valid: 首选轨迹滑动历史是否已填满 seq_len 帧以进行预测
         """
         height, width = frame.shape[:2]
         self.height, self.width = height, width
         
-        # 动态计算分辨率相关的缩放因子 (以仿真基准 1280x720 为参考)
         scale_area = (width * height) / (1280.0 * 720.0)
         scale_linear = np.sqrt(scale_area)
         current_max_offset_jump = self.max_offset_jump * scale_linear
         current_max_drone_move = self.max_drone_move * scale_linear
+        sky_height_limit = int(height * (1100.0 / 1440.0))
         
-        if csv_row is not None:
-            # 1. 数据驱动模式 (CSV-Driven)
-            current_x = csv_row["x_center"]
-            current_y = csv_row["y_center"]
-            w = csv_row.get("bbox_width", 50.0)
-            h = csv_row.get("bbox_height", 50.0)
-            conf = csv_row.get("detector_confidence", 1.0)
+        # 1. 提取当前帧二值化检测的候选点
+        centroids = self.detect_all_centroids(frame, thresh_val=120)
+        if not centroids and not self.tracks:
+            centroids = self.detect_all_centroids(frame, thresh_val=130)
             
-            # 局域搜寻偏置修正量
-            drone_center = self.detect_drone_centroid(frame, (int(current_x), int(current_y)))
+        # 2. 估计每条轨迹的外推位置用于邻近匹配
+        track_predictions = {}
+        for tid, track in self.tracks.items():
+            last_pt = track.history_buffer[-1]
+            pred_x, pred_y = last_pt['px'], last_pt['py']
+            if len(track.history_buffer) >= 2:
+                prev_pt = track.history_buffer[-2]
+                vx = last_pt['px'] - prev_pt['px']
+                vy = last_pt['py'] - prev_pt['py']
+                pred_x += vx
+                pred_y += vy
+            track_predictions[tid] = (pred_x, pred_y)
             
-            # 使用偏置跳跃门限过滤背景噪点，确保偏置外参随相机平滑移动
-            if drone_center is not None:
-                proposed_offset = (float(drone_center[0] - current_x), float(drone_center[1] - current_y))
-                if not self.offset_initialized:
-                    self.last_valid_offset = proposed_offset
-                    self.offset_initialized = True
-                    drone_pos = drone_center
-                else:
-                    dx = proposed_offset[0] - self.last_valid_offset[0]
-                    dy = proposed_offset[1] - self.last_valid_offset[1]
-                    dist = np.sqrt(dx**2 + dy**2)
-                    if dist < current_max_offset_jump:
+        # 3. 贪婪匹配关联
+        matched_centroids = set()
+        matched_tracks = set()
+        match_candidates = []
+        for tid, track in self.tracks.items():
+            pred_pos = track_predictions[tid]
+            for c_idx, c in enumerate(centroids):
+                dist = np.hypot(c[0] - pred_pos[0], c[1] - pred_pos[1])
+                if dist < current_max_drone_move:
+                    match_candidates.append((dist, tid, c_idx))
+                    
+        match_candidates.sort(key=lambda x: x[0])
+        
+        for dist, tid, c_idx in match_candidates:
+            if tid not in matched_tracks and c_idx not in matched_centroids:
+                matched_tracks.add(tid)
+                matched_centroids.add(c_idx)
+                c = centroids[c_idx]
+                track = self.tracks[tid]
+                
+                # 数据对齐机制 (CSV-Driven)
+                if csv_row is not None and self._is_closest_to_csv(track, csv_row):
+                    current_x, current_y = csv_row["x_center"], csv_row["y_center"]
+                    proposed_offset = (float(c[0] - current_x), float(c[1] - current_y))
+                    if not self.offset_initialized:
                         self.last_valid_offset = proposed_offset
-                        drone_pos = drone_center
+                        self.offset_initialized = True
+                        aligned_px, aligned_py = c[0], c[1]
                     else:
-                        # 偏置突变，判定为检测到了森林树木杂点，抛弃它并使用上一帧有效偏置
-                        drone_pos = (int(current_x + self.last_valid_offset[0]), int(current_y + self.last_valid_offset[1]))
-            else:
-                if self.offset_initialized:
-                    drone_pos = (int(current_x + self.last_valid_offset[0]), int(current_y + self.last_valid_offset[1]))
+                        dx = proposed_offset[0] - self.last_valid_offset[0]
+                        dy = proposed_offset[1] - self.last_valid_offset[1]
+                        offset_dist = np.sqrt(dx**2 + dy**2)
+                        if offset_dist < current_max_offset_jump:
+                            self.last_valid_offset = proposed_offset
+                            aligned_px, aligned_py = c[0], c[1]
+                        else:
+                            aligned_px = current_x + self.last_valid_offset[0]
+                            aligned_py = current_y + self.last_valid_offset[1]
+                            
+                    track.history_buffer.append({
+                        'x': current_x, 'y': current_y,
+                        'px': float(aligned_px), 'py': float(aligned_py),
+                        'w': float(c[2]), 'h': float(c[3]), 'conf': csv_row.get("detector_confidence", 1.0)
+                    })
                 else:
-                    drone_pos = (int(current_x), int(current_y))
+                    # 纯视频检测物理更新
+                    track.history_buffer.append({
+                        'x': float(c[0]), 'y': float(c[1]),
+                        'px': float(c[0]), 'py': float(c[1]),
+                        'w': float(c[2]), 'h': float(c[3]), 'conf': 1.0
+                    })
                     
-            # 缓存历史：除供预测用的原始 CSV 坐标外，同步存入当前已对齐的物理像素 px, py 用于连线
-            self.history_buffer.append({
-                'x': current_x, 'y': current_y,
-                'px': float(drone_pos[0]), 'py': float(drone_pos[1]),
-                'w': w, 'h': h, 'conf': conf
-            })
-        else:
-            # 2. 纯视频驱动模式 (Video-Only)
-            last_pos = None
-            if len(self.history_buffer) > 0:
-                last_pos = (int(self.history_buffer[-1]['px']), int(self.history_buffer[-1]['py']))
+                track.missing_frames = 0
+                track.invalid_dist_frames = 0
+                track.locked_positions.append((c[0], c[1]))
+                if len(track.locked_positions) > 50:
+                    track.locked_positions.pop(0)
                 
-            # 尝试以常规绝对阈值 120 局域/全局搜寻
-            drone_center = self.detect_drone_centroid(frame, last_pos, thresh_val=120)
+                # 一阶低通物理平滑防抖
+                latest = track.history_buffer[-1]
+                track.update_smooth_filter(latest['px'], latest['py'], latest['w'], latest['h'], alpha=0.65)
+                    
+        # 4. 未匹配轨线惯性盲推
+        dead_track_ids = []
+        for tid, track in self.tracks.items():
+            if tid not in matched_tracks:
+                track.missing_frames += 1
+                if track.missing_frames > self.max_missing_frames:
+                    dead_track_ids.append(tid)
+                else:
+                    # 外推虚假匹配以保持预测链条
+                    pred_pos = track_predictions[tid]
+                    last_pt = track.history_buffer[-1]
+                    track.history_buffer.append({
+                        'x': pred_pos[0] - self.last_valid_offset[0],
+                        'y': pred_pos[1] - self.last_valid_offset[1],
+                        'px': pred_pos[0], 'py': pred_pos[1],
+                        'w': last_pt['w'], 'h': last_pt['h'], 'conf': last_pt['conf'] * 0.8
+                    })
+                    track.invalid_dist_frames += 1
+                    track.locked_positions.append(pred_pos)
+                    if len(track.locked_positions) > 50:
+                        track.locked_positions.pop(0)
+                        
+                    # 平滑防抖
+                    latest = track.history_buffer[-1]
+                    track.update_smooth_filter(latest['px'], latest['py'], latest['w'], latest['h'], alpha=0.65)
+                        
+        # 释放注销死亡轨线
+        for tid in dead_track_ids:
+            del self.tracks[tid]
             
-            # 若局域追踪无果，尝试以放宽的绝对阈值 130 在局域范围内搜寻 (仅局域，以防全局大面积噪点)
-            if drone_center is None and last_pos is not None:
-                drone_center = self.detect_drone_centroid(frame, last_pos, thresh_val=130)
+        # 5. 轨迹级冲突去重合并机制 (Track Deduplication)
+        # 如果两条 Tracks 的最新物理位置距离小于 35 px，说明是对同一目标的重复检测分裂，直接裁决合并
+        if len(self.tracks) > 1:
+            tids = list(self.tracks.keys())
+            merged_tids = set()
+            for i in range(len(tids)):
+                tid1 = tids[i]
+                if tid1 in merged_tids or tid1 not in self.tracks:
+                    continue
+                track1 = self.tracks[tid1]
+                last_pt1 = track1.history_buffer[-1]
                 
-            # 若全局未找到，且天空为空，我们也允许再次尝试用放宽阈值 130 全局搜索天空中微弱的目标
-            if drone_center is None and last_pos is None:
-                drone_center = self.detect_drone_centroid(frame, last_pos=None, thresh_val=130)
+                for j in range(i + 1, len(tids)):
+                    tid2 = tids[j]
+                    if tid2 in merged_tids or tid2 not in self.tracks:
+                        continue
+                    track2 = self.tracks[tid2]
+                    last_pt2 = track2.history_buffer[-1]
+                    
+                    dist = np.hypot(last_pt1['px'] - last_pt2['px'], last_pt1['py'] - last_pt2['py'])
+                    if dist < 35.0:
+                        prob1 = track1.classification_prob if track1.classification_prob is not None else -1.0
+                        prob2 = track2.classification_prob if track2.classification_prob is not None else -1.0
+                        
+                        if abs(prob1 - prob2) < 1e-4:
+                            age1 = len(track1.history_buffer)
+                            age2 = len(track2.history_buffer)
+                            keep_tid = tid1 if age1 >= age2 else tid2
+                            delete_tid = tid2 if keep_tid == tid1 else tid1
+                        else:
+                            keep_tid = tid1 if prob1 >= prob2 else tid2
+                            delete_tid = tid2 if keep_tid == tid1 else tid1
+                            
+                        merged_tids.add(delete_tid)
+                        
+            for tid in merged_tids:
+                if tid in self.tracks:
+                    del self.tracks[tid]
+            
+        # 6. 统一静态背景死锁阻断
+        for tid, track in list(self.tracks.items()):
+            is_deadlocked = False
+            if len(track.locked_positions) >= 30:
+                recent_30 = track.locked_positions[-30:]
+                xs = [p[0] for p in recent_30]
+                ys = [p[1] for p in recent_30]
+                span_x = max(xs) - min(xs)
+                span_y = max(ys) - min(ys)
                 
-            if drone_center is not None:
-                self.last_valid_offset = (0.0, 0.0)
-                
-                # 连续帧位移门限过滤，防止偶发噪点引起框闪跳
-                if len(self.history_buffer) > 0:
-                    last_pt = self.history_buffer[-1]
-                    dx = drone_center[0] - last_pt['px']
-                    dy = drone_center[1] - last_pt['py']
-                    dist = np.sqrt(dx**2 + dy**2)
-                    if dist < current_max_drone_move:
-                        drone_pos = drone_center
-                        self.invalid_dist_frames = 0
-                    else:
-                        # 超过单帧最大位移，判定为噪点，维持上一帧位置并增加无效帧计数
-                        self.invalid_dist_frames += 1
-                        drone_pos = (int(last_pt['px']), int(last_pt['py']))
-                else:
-                    drone_pos = drone_center
-            else:
-                # 局域内或全局均未检测到目标，维持上一帧位置（如有）并增加无效计数
-                if len(self.history_buffer) > 0:
-                    last_pt = self.history_buffer[-1]
-                    drone_pos = (int(last_pt['px']), int(last_pt['py']))
-                    self.invalid_dist_frames += 1
-                else:
-                    drone_pos = None
-                    
-            # 统一静态死锁监测与自动释放
-            if drone_pos is not None:
-                self.locked_positions.append(drone_pos)
-                if len(self.locked_positions) > 50:
-                    self.locked_positions.pop(0)
-                    
-                is_deadlocked = False
-                if len(self.locked_positions) >= 30:
-                    recent_30 = self.locked_positions[-30:]
-                    xs = [p[0] for p in recent_30]
-                    ys = [p[1] for p in recent_30]
-                    span_x = max(xs) - min(xs)
-                    span_y = max(ys) - min(ys)
-                    
-                    sky_height_limit = int(height * (1100.0 / 1440.0))
-                    is_near_ground = drone_pos[1] >= sky_height_limit
-                    
-                    # 地面死锁分支：地面区域静止不动超 30 帧 (极差小于 5 * scale_linear)
-                    if is_near_ground and span_x < 5.0 * scale_linear and span_y < 5.0 * scale_linear:
+                is_near_ground = track.locked_positions[-1][1] >= sky_height_limit
+                if is_near_ground and span_x < 5.0 * scale_linear and span_y < 5.0 * scale_linear:
+                    is_deadlocked = True
+                elif len(track.locked_positions) >= 50:
+                    recent_50 = track.locked_positions[-50:]
+                    xs_50 = [p[0] for p in recent_50]
+                    ys_50 = [p[1] for p in recent_50]
+                    span_x_50 = max(xs_50) - min(xs_50)
+                    span_y_50 = max(ys_50) - min(ys_50)
+                    if span_x_50 < 3.0 * scale_linear and span_y_50 < 3.0 * scale_linear:
                         is_deadlocked = True
                         
-                    # 全局静止分支：任意区域（包括天空）完全静止不动超 50 帧 (极差小于 3 * scale_linear)
-                    # 且天空中发现了另一个明显的、有位移的新候选点（不是自身）
-                    elif len(self.locked_positions) >= 50:
-                        recent_50 = self.locked_positions[-50:]
-                        xs_50 = [p[0] for p in recent_50]
-                        ys_50 = [p[1] for p in recent_50]
-                        span_x_50 = max(xs_50) - min(xs_50)
-                        span_y_50 = max(ys_50) - min(ys_50)
-                        if span_x_50 < 3.0 * scale_linear and span_y_50 < 3.0 * scale_linear:
-                            # 首先在天空中用阈值 120 寻找新目标
-                            new_global_center = self.detect_drone_centroid(frame, last_pos=None, thresh_val=120)
-                            if new_global_center is None:
-                                # 没找到则尝试放宽绝对阈值 130
-                                new_global_center = self.detect_drone_centroid(frame, last_pos=None, thresh_val=130)
-                                
-                            if new_global_center is not None:
-                                dist_to_new = np.hypot(new_global_center[0] - drone_pos[0], new_global_center[1] - drone_pos[1])
-                                if dist_to_new > 10.0 * scale_linear:
-                                    is_deadlocked = True
-                                
-                if is_deadlocked:
-                    # 判定死锁，清空缓存，并重新捕获
-                    self.history_buffer.clear()
-                    self.locked_positions.clear()
-                    self.invalid_dist_frames = 0
-                    
-                    # 尝试重新全局搜寻，优先使用绝对阈值 120，找不到用放宽阈值 130
-                    global_center = self.detect_drone_centroid(frame, last_pos=None, thresh_val=120)
-                    if global_center is None:
-                        global_center = self.detect_drone_centroid(frame, last_pos=None, thresh_val=130)
-                        
-                    if global_center is not None:
-                        drone_pos = global_center
-                        self.locked_positions.append(drone_pos)
-                        self.history_buffer.append({
-                            'x': float(drone_pos[0]), 'y': float(drone_pos[1]),
-                            'px': float(drone_pos[0]), 'py': float(drone_pos[1]),
-                            'w': 50.0, 'h': 50.0, 'conf': 1.0
-                        })
+            if is_deadlocked:
+                del self.tracks[tid]
+                
+        # 7. 未匹配检测点在新一轮去重后，若在天空中且孤立则升级为新轨迹
+        for c_idx, c in enumerate(centroids):
+            if c_idx not in matched_centroids:
+                if c[1] < sky_height_limit:
+                    # 天空中独立点生成判定
+                    coords = np.array([[p[0], p[1]] for p in centroids])
+                    if len(coords) > 1:
+                        dists = np.hypot(coords[:, 0] - c[0], coords[:, 1] - c[1])
+                        neighbors = np.sum(dists < 150.0 * scale_linear) - 1
                     else:
-                        drone_pos = None
-                else:
-                    self.history_buffer.append({
-                        'x': float(drone_pos[0]), 'y': float(drone_pos[1]),
-                        'px': float(drone_pos[0]), 'py': float(drone_pos[1]),
-                        'w': 50.0, 'h': 50.0, 'conf': 1.0
-                    })
-            else:
-                self.history_buffer.clear()
-                self.locked_positions.clear()
-                self.invalid_dist_frames = 0
-
-        # 限制缓存窗口大小
-        if len(self.history_buffer) > self.seq_len:
-            self.history_buffer.pop(0)
+                        neighbors = 0
+                        
+                    if neighbors < 4:
+                        new_track = Track(
+                            track_id=self.next_track_id,
+                            first_pos=(float(c[0]), float(c[1])),
+                            w=float(c[2]),
+                            h=float(c[3]),
+                            conf=1.0
+                        )
+                        # 首帧偏置对齐
+                        if csv_row is not None and self._is_closest_to_csv(new_track, csv_row):
+                            current_x, current_y = csv_row["x_center"], csv_row["y_center"]
+                            proposed_offset = (float(c[0] - current_x), float(c[1] - current_y))
+                            self.last_valid_offset = proposed_offset
+                            self.offset_initialized = True
+                            new_track.history_buffer[0] = {
+                                'x': current_x, 'y': current_y,
+                                'px': float(c[0]), 'py': float(c[1]),
+                                'w': float(c[2]), 'h': float(c[3]), 'conf': csv_row.get("detector_confidence", 1.0)
+                            }
+                            # 初始化平滑防抖属性
+                            new_track.smooth_px = float(c[0])
+                            new_track.smooth_py = float(c[1])
+                            new_track.smooth_w = float(c[2])
+                            new_track.smooth_h = float(c[3])
+                            
+                        self.tracks[self.next_track_id] = new_track
+                        self.next_track_id += 1
+                        
+        # 8. 限制历史滑动窗口最大长度为 seq_len
+        for track in self.tracks.values():
+            if len(track.history_buffer) > self.seq_len:
+                track.history_buffer.pop(0)
+                
+        # 9. 兼容性输出 (寻找最高置信度的主轨迹输出其物理坐标)
+        primary_track = None
+        uav_tracks = [t for t in self.tracks.values() if t.is_uav]
+        if uav_tracks:
+            primary_track = max(uav_tracks, key=lambda t: t.classification_prob)
+        elif self.tracks:
+            primary_track = min(self.tracks.values(), key=lambda t: t.track_id)
             
-        is_valid = len(self.history_buffer) == self.seq_len
+        if primary_track is not None and primary_track.history_buffer:
+            # 返回平滑防抖后的物理显示坐标以供主显示绘制
+            drone_pos = (int(primary_track.smooth_px), int(primary_track.smooth_py))
+            is_valid = len(primary_track.history_buffer) == self.seq_len
+        else:
+            drone_pos = None
+            is_valid = False
+            
         return drone_pos, self.last_valid_offset, is_valid
 
-    def get_features(self) -> np.ndarray:
+    def get_track_features(self, track: Track) -> np.ndarray:
         """
-        提取用于 GRU 预测的时序归一化特征
+        提取用于特定轨迹的 GRU 推理的时序特征
         """
-        x = np.array([pt['x'] for pt in self.history_buffer], dtype=np.float64)
-        y = np.array([pt['y'] for pt in self.history_buffer], dtype=np.float64)
-        w = np.array([pt['w'] for pt in self.history_buffer], dtype=np.float64)
-        h = np.array([pt['h'] for pt in self.history_buffer], dtype=np.float64)
-        conf = np.array([pt['conf'] for pt in self.history_buffer], dtype=np.float64)
+        x = np.array([pt['x'] for pt in track.history_buffer], dtype=np.float64)
+        y = np.array([pt['y'] for pt in track.history_buffer], dtype=np.float64)
+        w = np.array([pt['w'] for pt in track.history_buffer], dtype=np.float64)
+        h = np.array([pt['h'] for pt in track.history_buffer], dtype=np.float64)
+        conf = np.array([pt['conf'] for pt in track.history_buffer], dtype=np.float64)
         
         # 差分前全局平滑
         if self.smooth and len(x) >= 5:
@@ -318,8 +434,6 @@ class FeatureTracker:
             y = savgol_filter(y, 5, 2)
             
         if self.normalize:
-            # 动态获取当前视频宽度 and 高度，并映射回 1280x720 基准尺度后再除以 2560/1440 进行归一化
-            # x_norm = (x * (1280 / w_ref)) / 2560 = x / (2.0 * w_ref)
             w_ref = getattr(self, "width", 1280.0)
             h_ref = getattr(self, "height", 720.0)
             x_norm = x / (2.0 * w_ref)
@@ -352,3 +466,12 @@ class FeatureTracker:
             
         features = np.stack(feature_list, axis=-1)
         return features.astype(np.float32)
+
+    def get_features(self) -> np.ndarray:
+        """
+        兼容原单目标特征提取方法的接口
+        """
+        if not self.tracks:
+            return np.zeros((self.seq_len, self.input_dim), dtype=np.float32)
+        primary_track = min(self.tracks.values(), key=lambda t: t.track_id)
+        return self.get_track_features(primary_track)

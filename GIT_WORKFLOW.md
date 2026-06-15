@@ -1,6 +1,6 @@
 # UAV Trajectory System 版本管理与 Git 开发规范
 
-为了规范后续的项目管理，我们建议后续所有的功能开发、Bug 修复均采用**分支开发**，并通过 **Pull Request (PR)** 的形式合并到 `main` 分支。同时，使用 **Git Tags** 标记版本，以确保能够随时拉取和定位到历史任意版本。
+为了规范后续的项目管理，我们建议后续所有的功能开发、Bug 修复均采用**分支开发**，并通过 **Pull Request (PR)** 的形式合并到 `development` 分支。只有在需要发布正式稳定版本时，才将 `development` 分支合并到主分支 `main`。同时，使用 **Git Tags** 标记版本，以确保能够随时拉取和定位到历史任意版本。
 
 ---
 
@@ -9,11 +9,11 @@
 每次进行新的任务（如：优化轨迹预测算法、打包模型、写测试脚本等）时，请按照以下流程操作：
 
 ### 1. 本地创建功能分支
-每次开发前，先切换到 `main` 分支拉取最新代码，并创建一个专属的功能分支：
+每次开发前，先切换到 `development` 分支拉取最新代码，并创建一个专属的功能分支：
 ```bash
-# 切换到主分支并拉取最新
-git checkout main
-git pull origin main
+# 切换到开发分支并拉取最新
+git checkout development
+git pull origin development
 
 # 创建并切换到新分支（命名推荐：feature/功能名 或 bugfix/修复名）
 git checkout -b feature/optimize-gru-model

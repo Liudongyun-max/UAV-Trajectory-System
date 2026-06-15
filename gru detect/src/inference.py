@@ -202,46 +202,61 @@ class InferenceSession:
                 row_valid = False
 
         if self.has_tracks and not row_valid:
-            drone_pos = None
-            offset = self.tracker.last_valid_offset
-            is_valid = False
+            drone_pos, offset, is_valid = self.tracker.update(frame, csv_row=None)
         else:
             drone_pos, offset, is_valid = self.tracker.update(frame, csv_row)
-        
-        # 调试打印，彻底查明渲染帧时的具体坐标
-        if 900 <= self.frame_idx <= 910:
-            print(f"[RENDER_DEBUG] Frame {self.frame_idx} | drone_pos: {drone_pos} | csv_row_x: {csv_row['x_center'] if csv_row else None} | offset: ({offset[0]:.2f}, {offset[1]:.2f})")
             
         rendered = frame.copy()
         pred_coords = []
         gt_coords = []
         frame_ade = 0.0
-        classification_prob = None
 
-        if is_valid and self.frame_idx >= self.start_idx:
-            if not self.takeoff_triggered:
-                self.takeoff_triggered = True
-                self._log(f"[INFO] 第 {self.frame_idx} 帧开始实时预测。")
-            features_np = self.tracker.get_features()
-            features_t = torch.tensor(features_np, dtype=torch.float32).unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                logits, pred_offsets = self.model(features_t)
-                pred_offsets = pred_offsets.squeeze(0).cpu().numpy()
-                classification_prob = torch.sigmoid(logits).item()
-
-            if drone_pos is not None:
-                current_x, current_y = drone_pos
+        # 对每一个 Track 分别运行 GRU 时序推理并确认真伪
+        for tid, track in self.tracker.tracks.items():
+            if len(track.history_buffer) == self.seq_len:
+                features_np = self.tracker.get_track_features(track)
+                features_t = torch.tensor(features_np, dtype=torch.float32).unsqueeze(0).to(self.device)
+                
+                with torch.no_grad():
+                    logits, pred_offsets = self.model(features_t)
+                    pred_offsets = pred_offsets.squeeze(0).cpu().numpy()
+                    prob = torch.sigmoid(logits).item()
+                    
+                track.classification_prob = prob
+                # 适当上调分类置信度判定阈值至 0.60，以排除弱噪声干扰
+                track.is_uav = prob >= 0.60
+                
+                # 采用防抖平滑位置 smooth_px/py 作为预测坐标的起点，消除抖动
+                current_x, current_y = track.smooth_px, track.smooth_py
                 scale_x = self.width / 2.0
                 scale_y = self.height / 2.0
+                
+                track_pred = []
                 for off in pred_offsets:
-                    pred_coords.append((int(current_x + off[0] * scale_x), int(current_y + off[1] * scale_y)))
-                if self.show_pred:
-                    for i in range(1, len(pred_coords)):
-                        cv2.line(rendered, pred_coords[i - 1], pred_coords[i], (255, 255, 0), 2, cv2.LINE_AA)
-                    for coord in pred_coords:
-                        cv2.circle(rendered, coord, 4, (255, 255, 0), -1, cv2.LINE_AA)
+                    track_pred.append((int(current_x + off[0] * scale_x), int(current_y + off[1] * scale_y)))
+                track.pred_coords = track_pred
+            else:
+                track.classification_prob = None
+                track.is_uav = False
+                track.pred_coords = []
 
-            if self.df_ideal is not None and drone_pos is not None:
+        # 筛选置信度最高（classification_prob最大）的唯一黄金主轨迹进行高亮展示，隐藏其它多余分支
+        primary_track = None
+        uav_tracks = [t for t in self.tracker.tracks.values() if t.is_uav]
+        if uav_tracks:
+            primary_track = max(uav_tracks, key=lambda t: t.classification_prob)
+
+        # 寻找匹配 CSV 数据的目标，以计算 ADE 评估值
+        bound_track = None
+        if csv_row is not None:
+            bound_tid = self.tracker._find_csv_bound_track_id(csv_row)
+            if bound_tid is not None and bound_tid in self.tracker.tracks:
+                bound_track = self.tracker.tracks[bound_tid]
+
+        # 评估精度，使用绑定的 track（计算 ADE 兼容评估指标）
+        if bound_track is not None and bound_track.is_uav and bound_track.pred_coords:
+            pred_coords = bound_track.pred_coords
+            if self.df_ideal is not None:
                 gt_rows = self.df_ideal.iloc[self.frame_idx + 1 : self.frame_idx + 1 + self.future_steps]
                 if {"x_center", "y_center"}.issubset(gt_rows.columns):
                     gt_coords = [(int(r["x_center"] + offset[0]), int(r["y_center"] + offset[1])) for _, r in gt_rows.iterrows()]
@@ -250,7 +265,7 @@ class InferenceSession:
                             cv2.line(rendered, gt_coords[i - 1], gt_coords[i], (0, 255, 0), 2, cv2.LINE_AA)
                         for coord in gt_coords:
                             cv2.circle(rendered, coord, 4, (0, 255, 0), -1, cv2.LINE_AA)
-
+                            
             if len(gt_coords) == len(pred_coords) and gt_coords:
                 errors = [np.hypot(p[0] - g[0], p[1] - g[1]) for p, g in zip(pred_coords, gt_coords)]
                 frame_ade = float(np.mean(errors))
@@ -261,46 +276,64 @@ class InferenceSession:
                     "gt_points": ";".join([f"{x},{y}" for x, y in gt_coords]),
                 })
 
-        self._draw_history_and_hud(rendered, drone_pos, offset, classification_prob, frame_ade, bool(gt_coords), is_valid)
+        # 单一主轨渲染与 HUD 信息绘制 (全图只显示最高置信度的唯一 UAV)
+        self._draw_history_and_hud(rendered, primary_track, frame_ade, bool(gt_coords))
         self.last_ade = frame_ade
         return rendered, frame_ade
 
-    def _draw_history_and_hud(self, frame, drone_pos, offset, classification_prob, frame_ade, has_gt, is_valid):
-        # 绘制历史轨迹线 (直接连线已在各帧校准完毕的物理像素点 px, py，根治漂移)
-        if self.show_hist:
-            for i in range(1, len(self.tracker.history_buffer)):
-                p0 = self.tracker.history_buffer[i - 1]
-                p1 = self.tracker.history_buffer[i]
-                if "px" in p0 and "px" in p1:
+    def _draw_history_and_hud(self, frame, primary_track, frame_ade, has_gt):
+        # 1. 有且仅对置信度最高的一条黄金主轨进行画面高亮框选和连线，排除重叠分支
+        if primary_track is not None and primary_track.is_uav:
+            # 绘制绿色历史轨迹 (使用 static px/py)
+            if self.show_hist and len(primary_track.history_buffer) > 1:
+                for i in range(1, len(primary_track.history_buffer)):
+                    p0 = primary_track.history_buffer[i - 1]
+                    p1 = primary_track.history_buffer[i]
                     pt0 = (int(p0["px"]), int(p0["py"]))
                     pt1 = (int(p1["px"]), int(p1["py"]))
                     cv2.line(frame, pt0, pt1, (0, 69, 255), 2, cv2.LINE_AA)
+                    
+            # 绘制黄色 BBox 框 (使用防抖平滑后的坐标 smooth_px/py/w/h)
+            cX = int(primary_track.smooth_px)
+            cY = int(primary_track.smooth_py)
+            w = max(30, int(primary_track.smooth_w))
+            h = max(30, int(primary_track.smooth_h))
+            cv2.rectangle(frame, (cX - w // 2, cY - h // 2), (cX + w // 2, cY + h // 2), (0, 255, 255), 2)
+            
+            # 标出唯一 UAV 的编号和分类概率
+            prob = primary_track.classification_prob if primary_track.classification_prob is not None else 1.0
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text = f"UAV #{primary_track.track_id} (conf: {prob:.2f})"
+            cv2.putText(frame, text, (cX - w // 2, cY - h // 2 - 8), font, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+            
+            # 绘制未来 5 步的预测轨迹线和点
+            if self.show_pred and primary_track.pred_coords:
+                pred_pts = primary_track.pred_coords
+                for i in range(1, len(pred_pts)):
+                    cv2.line(frame, pred_pts[i - 1], pred_pts[i], (255, 255, 0), 2, cv2.LINE_AA)
+                for coord in pred_pts:
+                    cv2.circle(frame, coord, 4, (255, 255, 0), -1, cv2.LINE_AA)
 
-        if drone_pos is not None and self.tracker.history_buffer:
-            latest = self.tracker.history_buffer[-1]
-            w = max(30, int(latest.get("w", 50)))
-            h = max(30, int(latest.get("h", 50)))
-            cv2.rectangle(frame, (drone_pos[0] - w // 2, drone_pos[1] - h // 2), (drone_pos[0] + w // 2, drone_pos[1] + h // 2), (0, 255, 255), 2)
+        # 2. 统计当前帧状态（用于 HUD 打印）
+        active_uavs = sum(1 for t in self.tracker.tracks.values() if t.is_uav)
+        filtered_noises = sum(1 for t in self.tracker.tracks.values() if not t.is_uav and len(t.history_buffer) >= 5)
 
+        # 3. 绘制带有磨砂黑背景的精致 HUD
         overlay = frame.copy()
-        cv2.rectangle(overlay, (16, 16), (440, 164), (20, 20, 20), -1)
-        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+        cv2.rectangle(overlay, (16, 16), (440, 185), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+        
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(frame, f"Frame: {self.frame_idx}/{self.total_frames}", (34, 48), font, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-        if classification_prob is None:
-            state = "WAITING TARGET/HISTORY" if not is_valid else "PREDICTING"
-            cv2.putText(frame, f"State: {state}", (34, 84), font, 0.55, (180, 180, 180), 1, cv2.LINE_AA)
-        else:
-            is_noise = classification_prob < 0.5
-            cls_text = "ANOMALY/NOISE" if is_noise else "TRUE UAV"
-            cls_color = (0, 0, 255) if is_noise else (0, 255, 0)
-            cv2.putText(frame, "State:", (34, 84), font, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(frame, f"{cls_text} ({classification_prob:.4f})", (100, 84), font, 0.55, cls_color, 1, cv2.LINE_AA)
+        cv2.putText(frame, f"Frame: {self.frame_idx}/{self.total_frames}", (34, 45), font, 0.52, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"Active UAVs: {active_uavs}", (34, 75), font, 0.52, (0, 255, 0) if active_uavs > 0 else (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, f"Filtered Noise Tracks: {filtered_noises}", (34, 105), font, 0.52, (0, 69, 255) if filtered_noises > 0 else (180, 180, 180), 1, cv2.LINE_AA)
+        
         if frame_ade > 0:
-            cv2.putText(frame, f"Frame ADE: {frame_ade:.2f} px", (34, 120), font, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(frame, f"Primary UAV ADE: {frame_ade:.2f} px", (34, 135), font, 0.52, (0, 255, 255), 1, cv2.LINE_AA)
         else:
-            cv2.putText(frame, "Frame ADE: N/A", (34, 120), font, 0.55, (160, 160, 160), 1, cv2.LINE_AA)
-        cv2.putText(frame, f"GT: {'ON' if has_gt else 'OFF'}  Smooth: {'ON' if self.smooth else 'OFF'}", (34, 150), font, 0.48, (255, 180, 80), 1, cv2.LINE_AA)
+            cv2.putText(frame, "Primary UAV ADE: N/A", (34, 135), font, 0.52, (160, 160, 160), 1, cv2.LINE_AA)
+            
+        cv2.putText(frame, f"GT: {'ON' if has_gt else 'OFF'}  Smooth: {'ON' if self.smooth else 'OFF'}", (34, 165), font, 0.45, (255, 180, 80), 1, cv2.LINE_AA)
 
     def close(self, status="执行完毕"):
         if self.finished:
