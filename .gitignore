@@ -32,3 +32,9 @@ test video/
 *.mp4
 *.avi
 *.log
+
+# 距离模型大文件与数据集过滤
+*.mkv
+distance model/input/
+distance model/exports/
+

@@ -1,0 +1,45 @@
+{
+  "dataset_version": "run017_windows_v2_audited",
+  "run_id": "run017",
+  "package_root": "F:\\UAV Trajectory System\\distance model",
+  "dataset_root": "F:\\UAV Trajectory System\\distance model\\dataset\\run017_windows_v2_audited",
+  "point_count_total": 1443,
+  "point_count_skipped": 1,
+  "frame_count": 179940,
+  "split_counts": {
+    "test": 35556,
+    "train": 108808,
+    "val": 35576
+  },
+  "grade_counts": {
+    "A": 3990,
+    "B": 24322,
+    "C": 151628
+  },
+  "fold_counts": {
+    "0": 36184,
+    "1": 36310,
+    "2": 36314,
+    "3": 35576,
+    "4": 35556
+  },
+  "feature_columns": [
+    "bbox_width_px",
+    "bbox_height_px",
+    "bbox_area_px",
+    "bbox_center_u",
+    "bbox_center_v",
+    "detector_confidence",
+    "physics_width_range_m",
+    "physics_height_range_m",
+    "physics_area_range_m",
+    "fused_range_m",
+    "bbox_aspect_ratio",
+    "bbox_center_u_norm",
+    "bbox_center_v_norm"
+  ],
+  "target_columns": [
+    "true_range_m",
+    "residual_range_m"
+  ]
+}

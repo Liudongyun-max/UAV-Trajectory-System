@@ -1,0 +1,38 @@
+{
+  "distance_residual_mlp_numpy.npz": {
+    "path": "models\\distance_residual_mlp_numpy.npz",
+    "exists": true,
+    "size_bytes": 28368,
+    "md5_checksum": "e10e87c4559506218b4287552adf36b8"
+  },
+  "best.pth": {
+    "path": "models\\best.pth",
+    "exists": true,
+    "size_bytes": 21424,
+    "md5_checksum": "11818fefb1babb3aea322ad570a13c27"
+  },
+  "distance_gru_static_25f.onnx": {
+    "path": "models\\distance_gru_static_25f.onnx",
+    "exists": true,
+    "size_bytes": 21323,
+    "md5_checksum": "a0aa011d8662830d2eae92608ebb0a93"
+  },
+  "distance_gru_static_25f.torchscript.pt": {
+    "path": "models\\distance_gru_static_25f.torchscript.pt",
+    "exists": true,
+    "size_bytes": 27741,
+    "md5_checksum": "b3b5285e60f3c5b50c8b7c5b7422e0f0"
+  },
+  "feature_schema.json": {
+    "path": "models\\feature_schema.json",
+    "exists": true,
+    "size_bytes": 596,
+    "md5_checksum": "88caa286d79b68f931de49cf1a60d721"
+  },
+  "normalization.json": {
+    "path": "models\\normalization.json",
+    "exists": true,
+    "size_bytes": 1449,
+    "md5_checksum": "d8b87b5d3ed6aaf27dfa50622fc46d0b"
+  }
+}

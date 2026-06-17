@@ -1,0 +1,18 @@
+{
+  "status": "pass",
+  "leaked_features": [],
+  "banned_keywords_checked": [
+    "true_range",
+    "residual_range",
+    "residual",
+    "nominal_distance",
+    "distance_bin",
+    "range_error",
+    "coordinate_error",
+    "run_id",
+    "session_id",
+    "point_id",
+    "point_path",
+    "source_video"
+  ]
+}

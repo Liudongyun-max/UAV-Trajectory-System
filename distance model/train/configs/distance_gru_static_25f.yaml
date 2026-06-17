@@ -1,0 +1,40 @@
+experiment:
+  name: run017_distance_gru_static_25f
+  seed: 42
+
+data:
+  source_root: "../exports/gru_input/run017" # 注意：虽然 Word 写 distance data，但这里我们指向正确的 distance model 路径
+  sequence_length: 25
+  stride: 5
+  target_mode: last_frame
+  scene_features: false
+  fps_profiles:
+    - fps: 25
+      weight: 0.5
+    - fps: 15
+      weight: 0.5
+
+model:
+  type: gru_distance_stabilizer
+  hidden_dim: 32
+  num_layers: 1
+  bidirectional: false
+  predict_uncertainty: false
+
+training:
+  batch_size: 128
+  epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  early_stopping_patience: 12
+
+loss:
+  type: huber
+  stability_weight: 0.05
+
+evaluation:
+  group_key: session_id
+  folds: 5
+  report_by_scene: true
+  report_by_distance_band: true
+  report_by_fps: true

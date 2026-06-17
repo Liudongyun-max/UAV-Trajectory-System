@@ -1,0 +1,12 @@
+{
+  "pure_video_mode": {
+    "fps_source": "cv2.VideoCapture.get(cv2.CAP_PROP_FPS)",
+    "frame_delta_t_source": "1.0 / fps_val",
+    "potential_risks": "当视频是可变帧率(VFR)或发生掉帧时，硬编码的恒定 dt 会与真实时间戳偏离，导致 GRU 输入的时序漂移；同时如果视频实际 FPS (例如30 FPS) 明显偏离模型训练分布 (15/25 FPS)，会引入系统偏差。"
+  },
+  "csv_mode": {
+    "fps_source": "GUI默认设定的常量 fps (25.0)",
+    "frame_delta_t_source": "特征CSV数据包中读取的真实时间差值列 frame_delta_t_s",
+    "potential_risks": "如果读取到的数据包中 frame_delta_t_s 为 0 或缺失，由于 std 归一化除以较小标准差会产生无穷大，导致 GRU 隐藏状态爆炸崩溃。"
+  }
+}

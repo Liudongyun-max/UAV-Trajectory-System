@@ -1,0 +1,32 @@
+measurement_quality:
+  min_bbox_width_px: 3.0
+  min_bbox_height_px: 3.0
+  min_mask_area_px: 9.0
+  min_solidity: 0.85
+  max_component_count: 3
+  max_physics_disagreement_ratio: 0.5
+
+motion_gate:
+  max_radial_speed_mps: 50.0
+  max_radial_acceleration_mps2: 25.0
+  innovation_sigma_gate: 3.0
+  downweight_threshold: 1.5
+  reject_threshold: 3.0
+
+tracking:
+  coasting_timeout_s: 0.4
+  lost_timeout_s: 1.0
+  reacquire_confirm_frames: 3
+  gru_warmup_frames: 25
+
+filters:
+  median_short_window: 5
+  median_long_window: 25
+  ema_alpha: 0.15
+  kalman_process_noise: 0.01
+  kalman_measurement_noise: 1.0
+
+runtime:
+  use_actual_timestamps: true
+  scene_features: false
+  prohibit_fake_500m_clamp: true

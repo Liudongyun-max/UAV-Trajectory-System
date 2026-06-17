@@ -1,0 +1,12 @@
+{
+  "split_session_overlap": [],
+  "split_point_overlap": [],
+  "split_session_overlap_count": 0,
+  "split_point_overlap_count": 0,
+  "fold_session_overlap": [],
+  "fold_point_overlap": [],
+  "fold_session_overlap_count": 0,
+  "fold_point_overlap_count": 0,
+  "point_overlap_count": 0,
+  "session_overlap_count": 0
+}

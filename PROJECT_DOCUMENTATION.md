@@ -1,6 +1,7 @@
 # UAV Trajectory System — 完整项目说明文档
 
-> **版本**: v3.0 | **更新日期**: 2026-06-14 | **分析深度**: 全维度全模块深度剖析
+> **版本**: v7.0 | **更新日期**: 2026-06-18
+> **项目规模**: 55,000+文件 | 128个Python文件 | 15,798行代码 | 444个Episode | 20个模型文件 | ~3.4GB数据
 
 ---
 
@@ -14,12 +15,13 @@
 6. [GRU 轨迹预测模型](#6-gru-轨迹预测模型)
 7. [GRU 检测模块 (gru detect)](#7-gru-检测模块)
 8. [YOLOv5+GRU 集成模块](#8-yolov5gru-集成模块)
-9. [训练框架模块 (train)](#9-训练框架模块)
-10. [质量分级体系](#10-质量分级体系)
-11. [技术栈与依赖](#11-技术栈与依赖)
-12. [代码质量分析](#12-代码质量分析)
-13. [部署与运维指南](#13-部署与运维指南)
-14. [改进建议与路线图](#14-改进建议与路线图)
+9. [距离估算模块 (distance model)](#9-距离估算模块)
+10. [训练框架模块](#10-训练框架模块)
+11. [质量分级体系](#11-质量分级体系)
+12. [技术栈与依赖](#12-技术栈与依赖)
+13. [代码质量分析](#13-代码质量分析)
+14. [部署与运维指南](#14-部署与运维指南)
+15. [改进建议与路线图](#15-改进建议与路线图)
 
 ---
 
@@ -27,27 +29,26 @@
 
 ### 1.1 项目定位
 
-**UAV Trajectory System** 是一套面向无人机 (UAV) 目标检测、轨迹跟踪与时序预测的全栈系统，涵盖从仿真数据采集、数据质量审计、模型训练到边缘端实时部署的完整工作流程。
-
-系统核心能力：
-- **多摄像头实时检测**: 5路 USB 摄像头同时采集，RK3588 NPU 加速推理
-- **运动引导级联检测**: 帧差分 + LCM 对比度滤波 + YOLO 精细识别
-- **多目标轨迹跟踪**: Kalman 风格多特征跟踪器，支持模板匹配与动态门控
-- **时序轨迹预测**: GRU 网络对 20 帧历史轨迹分类（真/伪目标）并预测未来 5 帧位置
-- **端到端级联管线**: YOLOv5 + GRU 完整检测-跟踪-预测管线
-- **自动化数据审计**: 8 阶段数据质量分析，A/B/C/D 四级评定
+**UAV Trajectory System** 是一套面向无人机 (UAV) 目标检测、轨迹跟踪、时序预测与距离估算的全栈系统，涵盖从仿真数据采集、数据质量审计、模型训练到边缘端实时部署的完整工作流程。
 
 ### 1.2 关键指标
 
 | 指标 | 数值 |
 |------|------|
-| 总 Episode 数 | **444**（run001: 39 + run002: 30 + run004: 375） |
+| 总文件数 | **55,000+** |
+| Python文件数 | **128** |
+| Python代码行数 | **15,798** |
+| 总Episode数 | **444** (run001: 39 + run002: 30 + run004: 375) |
 | 飞行任务类型 | **13** 种 |
-| 距离范围 | **50m — 500m** |
-| 背景类型 | **3** 种（empty_clean, flat_ground_mild, forest_edge_medium） |
-| 每 Episode 文件数 | **17** 个 |
-| Python 源码总量 | **~8,000+ 行** |
-| GRU 模型参数量 | ~5K (基线) / ~25K (增强) |
+| 距离范围 | **20m — 500m** |
+| 背景类型 | **3** 种 |
+| 模型文件数 | **20** (.pth: 11, .pt: 5, .onnx: 2, .npz: 2) |
+| 总数据量 | **~3.4 GB** |
+| CSV数据文件 | **13,982** |
+| PNG图片 | **22,762** |
+| 视频文件 | **1,917** |
+| YAML配置 | **3,069** |
+| Markdown文档 | **907** |
 
 ---
 
@@ -56,32 +57,32 @@
 ### 2.1 系统架构图
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                          UAV Trajectory System                                  │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                 │
-│  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐          │
-│  │  数据采集层        │    │  质量分析层        │    │  模型训练层        │          │
-│  │  Gazebo + PX4     │───>│  analyze_episode  │───>│  train/          │          │
-│  │  5路摄像头仿真      │    │  batch_analyze    │    │  GRU Training    │          │
-│  └──────────────────┘    └──────────────────┘    └──────────────────┘          │
-│           │                       │                       │                     │
-│           v                       v                       v                     │
-│  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐          │
-│  │  export/input/    │    │  export/outputs/  │    │  models/         │          │
-│  │  444 Episodes     │    │  Analysis Reports │    │  *.pth           │          │
-│  └──────────────────┘    └──────────────────┘    └──────────────────┘          │
-│                                                             │                   │
-│                                                             v                   │
-│  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │                         推理与部署层                                     │   │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                  │   │
-│  │  │ gru detect/  │  │ yolov5+GRU/  │  │yolov5_model/ │                  │   │
-│  │  │ GRU独立推理   │  │ YOLO+GRU级联  │  │ RK3588边缘端  │                  │   │
-│  │  │ PyQt5 GUI    │  │ PyQt5 GUI    │  │ 5路实时检测    │                  │   │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘                  │   │
-│  └─────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                            UAV Trajectory System                                    │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                     │
+│  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐              │
+│  │  数据采集层        │    │  质量分析层        │    │  模型训练层        │              │
+│  │  Gazebo + PX4     │───>│  analyze_episode  │───>│  train/          │              │
+│  │  5路摄像头仿真      │    │  batch_analyze    │    │  GRU Training    │              │
+│  └──────────────────┘    └──────────────────┘    └──────────────────┘              │
+│           │                       │                       │                         │
+│           v                       v                       v                         │
+│  ┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐              │
+│  │  export/input/    │    │  export/outputs/  │    │  models/         │              │
+│  │  444 Episodes     │    │  Analysis Reports │    │  *.pth *.pt *.onnx│             │
+│  └──────────────────┘    └──────────────────┘    └──────────────────┘              │
+│                                                             │                       │
+│                                                             v                       │
+│  ┌─────────────────────────────────────────────────────────────────────────────┐   │
+│  │                           推理与部署层                                       │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │   │
+│  │  │ gru detect/  │  │ yolov5+GRU/  │  │yolov5_model/ │  │distance model│   │   │
+│  │  │ GRU独立推理   │  │ YOLO+GRU级联  │  │ RK3588边缘端  │  │ 距离估算      │   │   │
+│  │  │ PyQt5 GUI    │  │ PyQt5 GUI    │  │ 5路实时检测    │  │ 多模式推理    │   │   │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 目录结构
@@ -89,62 +90,77 @@
 ```
 F:\UAV Trajectory System\
 │
-├── analyze_episode.py              # 核心8阶段分析引擎 (953行)
-├── batch_analyze.py                # 批量分析调度器 (329行)
-├── run_yolo_gru_test.py            # YOLO+GRU测试启动器 (33行)
+├── analyze_episode.py              # 核心8阶段分析引擎 (861行)
+├── batch_analyze.py                # 批量分析调度器 (281行)
+├── run_yolo_gru_test.py            # YOLO+GRU测试启动器 (26行)
 │
-├── yolov5_model/                   # RK3588边缘端部署模块
-│   ├── main.py                     # 多摄像头实时检测系统 (1173行)
-│   ├── yololib.py                  # RKNN YOLOv5推理封装 (237行)
-│   ├── comms.py                    # UDP视频/数据传输 (67行)
-│   └── uav_yolo_rknn_report.md     # 系统审计报告 (239行)
+├── yolov5_model/                   # RK3588边缘端部署模块 (1,344行)
+│   ├── main.py                     # 多摄像头实时检测系统 (1,086行)
+│   ├── yololib.py                  # RKNN YOLOv5推理封装 (197行)
+│   ├── comms.py                    # UDP视频/数据传输 (61行)
+│   ├── best include small.pt       # YOLOv5预训练权重 (13.79MB)
+│   └── uav_yolo_rknn_report.md     # 系统审计报告
 │
-├── gru detect/                     # GRU独立检测模块
-│   ├── predict_gui.py              # PyQt5 GUI (437行)
+├── gru detect/                     # GRU独立检测模块 (1,319行)
+│   ├── predict_gui.py              # PyQt5 GUI (389行)
+│   ├── setup_env.bat               # 一键环境配置
+│   ├── 启动UAV预测窗口.vbs          # 一键启动脚本
 │   ├── src/
-│   │   ├── model.py                # GRU模型定义 (118行)
-│   │   ├── inference.py            # 推理会话管理 (374行)
-│   │   ├── tracker.py              # 多目标特征追踪器 (477行)
-│   │   └── paths.py                # 路径工具 (18行)
+│   │   ├── model.py                # GRU模型定义 (116行)
+│   │   ├── inference.py            # 推理会话管理 (335行)
+│   │   ├── tracker.py              # 多目标特征追踪器 (467行)
+│   │   └── paths.py                # 路径工具 (12行)
 │   ├── models/                     # 预训练模型
-│   │   ├── gru_baseline.pth        # 基线模型 (0.03MB)
-│   │   └── gru_enhanced.pth        # 增强模型 (0.17MB)
-│   └── outputs/                    # 推理输出
+│   │   ├── gru_baseline.pth        # 基线模型 (28KB)
+│   │   └── gru_enhanced.pth        # 增强模型 (174KB)
+│   └── outputs/                    # 推理输出 (21个episode)
 │
-├── yolov5+GRU/                     # YOLOv5+GRU端到端集成模块
-│   ├── pipeline.py                 # 级联检测+预测管线 (272行)
-│   ├── detector.py                 # 多后端YOLOv5检测器 (251行)
-│   ├── tracker.py                  # 单目标YOLO适配追踪器 (186行)
-│   ├── model.py                    # GRU模型副本 (118行)
-│   ├── gui_inference.py            # GUI推理会话 (201行)
-│   ├── predict_gui.py              # 增强版PyQt5 GUI (495行)
-│   ├── run.py                      # CLI运行器 (37行)
-│   └── test_pipeline.py            # 诊断测试 (48行)
+├── yolov5+GRU/                     # YOLOv5+GRU端到端集成模块 (1,499行)
+│   ├── pipeline.py                 # 级联检测+预测管线 (257行)
+│   ├── detector.py                 # 多后端YOLOv5检测器 (238行)
+│   ├── tracker.py                  # 单目标YOLO适配追踪器 (173行)
+│   ├── model.py                    # GRU模型副本 (116行)
+│   ├── gui_inference.py            # GUI推理会话 (193行)
+│   ├── predict_gui.py              # 增强版PyQt5 GUI (444行)
+│   ├── run.py                      # CLI运行器 (34行)
+│   └── test_pipeline.py            # 诊断测试 (44行)
 │
-├── train/                          # 模型训练框架
-│   ├── training/
-│   │   ├── config/                 # 配置管理
-│   │   ├── data/                   # 数据集与加载器
-│   │   ├── models/                 # 模型定义
-│   │   ├── losses/                 # 损失函数
-│   │   ├── trainers/               # 训练器与回调
-│   │   ├── evaluators/             # 评估器
-│   │   └── exporters/              # 模型导出
-│   ├── scripts/                    # 入口脚本
-│   ├── configs/                    # YAML配置
-│   ├── models/                     # 训练产物
-│   └── tests/                      # 单元测试
+├── distance model/                 # 距离估算模块 (10,363行) [最大模块]
+│   ├── distance_model_gui.py       # 距离模型可视化GUI (1,699行)
+│   ├── segmentation_mode/          # 分割模式
+│   │   ├── model.py                # GRU模型定义
+│   │   ├── tracker.py              # 分割追踪器 (494行)
+│   │   └── models/                 # 预训练模型
+│   ├── yolo_mode/                  # YOLO模式
+│   │   ├── detector.py             # YOLOv5检测器封装
+│   │   └── models/                 # 预训练模型
+│   ├── src/uav_distance_pipeline/  # 核心管线
+│   ├── tools/                      # 工具脚本
+│   ├── tests/                      # 测试文件 (15个)
+│   ├── train/                      # 完整训练框架
+│   │   ├── training/               # 训练模块
+│   │   ├── scripts/                # 入口脚本
+│   │   ├── configs/                # YAML配置
+│   │   └── tests/                  # 测试 (10个)
+│   ├── calibration/                # 摄像头标定
+│   ├── dataset/                    # 数据集
+│   ├── exports/                    # 导出数据
+│   ├── input/                      # 输入数据 (run017 + run018, 20,820文件)
+│   ├── models/                     # 训练模型
+│   └── reports/                    # 分析报告
 │
 ├── export/                         # 数据目录
-│   ├── input/                      # 原始Episode数据
+│   ├── input/                      # 原始Episode数据 (444个)
 │   │   ├── run001/                 # 39 episodes
 │   │   ├── run002/                 # 30 episodes
 │   │   └── run004/                 # 375 episodes
 │   └── outputs/analysis/           # 分析输出
 │
+├── test  vedio/                    # 测试视频 (1,917个mp4+avi)
 ├── agent/skill/                    # AI Agent技能定义
 ├── distance/                       # 距离标定规范
-└── document/                       # 技术文档
+├── document/                       # 技术文档
+└── .github/                        # GitHub模板
 ```
 
 ---
@@ -154,7 +170,7 @@ F:\UAV Trajectory System\
 ### 3.1 analyze_episode.py — 8阶段分析引擎
 
 **位置**: `F:\UAV Trajectory System\analyze_episode.py`
-**代码行数**: 953 行
+**代码行数**: 861 行
 
 #### 分析管线
 
@@ -172,7 +188,7 @@ F:\UAV Trajectory System\
 #### 数据流
 
 ```
-输入 Episode 目录
+输入: Episode目录
   │
   ├── episode.yaml ──────────> Stage 8 (元数据)
   ├── frames.csv ────────────> Stage 1,2,3,7,8
@@ -186,7 +202,7 @@ F:\UAV Trajectory System\
 ### 3.2 batch_analyze.py — 批量分析调度器
 
 **位置**: `F:\UAV Trajectory System\batch_analyze.py`
-**代码行数**: 329 行
+**代码行数**: 281 行
 
 **核心功能**:
 - 并行分析（ThreadPoolExecutor，最多10个工作线程）
@@ -225,28 +241,17 @@ F:\UAV Trajectory System\
 | 12 | s_curve | 10 m/s | 4 m/s² | S形正弦曲线 |
 | 13 | zigzag | 12 m/s | 5 m/s² | 快速锯齿形 |
 
-### 4.3 Episode 数据结构（17个文件）
+### 4.3 数据统计
 
-```
-episode_hover_d300_vhover_empty_clean_seed0001/
-├── camera_config.yaml          # 摄像头配置
-├── camera_info.json            # 内参矩阵K, 畸变D, 投影P, HFOV
-├── episode.yaml                # Episode完整元数据（30个字段）
-├── events.jsonl                # 16行事件日志
-├── execution.log               # 6行Shell命令日志
-├── frames.csv                  # 逐帧: frame_id, 时间戳, 同步误差
-├── ideal_tracks.csv            # 理想2D投影轨迹（GT）
-├── measured_tracks.csv         # 模拟含噪检测
-├── mission.yaml                # 飞行任务定义（17行）
-├── preview/                    # 预览PNG帧
-├── record_summary.json         # 录制摘要
-├── recorder_ready.json         # 录制器就绪状态
-├── rgb.mp4                     # 录制视频流
-├── scenario.json               # 场景元数据
-├── truth.csv                   # 3D世界状态
-├── validation.json             # 预分析验证结果
-└── world.world                 # Gazebo世界文件
-```
+| 类型 | 数量 | 大小 |
+|------|------|------|
+| CSV数据文件 | 13,982 | 1,294 MB |
+| PNG图片 | 22,762 | 691 MB |
+| MP4视频 | 1,897 | 1,550 MB |
+| AVI视频 | 20 | 477 MB |
+| YAML配置 | 3,069 | 2.18 MB |
+| JSON元数据 | 8,347 | 7.32 MB |
+| **总计** | **~55,000** | **~3.4 GB** |
 
 ---
 
@@ -256,9 +261,9 @@ episode_hover_d300_vhover_empty_clean_seed0001/
 
 | 文件 | 行数 | 职责 |
 |------|------|------|
-| main.py | 1173 | 多摄像头采集、运动检测、ROI提取、轨迹跟踪、推理调度、网络传输 |
-| yololib.py | 237 | RKNN模型封装：模型加载、输入预处理、多分支YOLO输出解码、NMS后处理 |
-| comms.py | 67 | UDP视频流和JSON数据遥测 |
+| main.py | 1,086 | 多摄像头采集、运动检测、ROI提取、轨迹跟踪、推理调度、网络传输 |
+| yololib.py | 197 | RKNN模型封装：模型加载、输入预处理、多分支YOLO输出解码、NMS后处理 |
+| comms.py | 61 | UDP视频流和JSON数据遥测 |
 
 ### 5.2 硬件平台
 
@@ -277,42 +282,6 @@ match_score = 0.42 × distance_score
             + 0.23 × yolo_confidence
             + 0.17 × template_score
             + 0.18 × motion_score
-```
-
-**双路径确认机制**:
-- YOLO直接确认: yolo_hits≥3, recent_hits≥3, misses=0, score≥0.40
-- 标准确认: hits≥4, recent_hits≥3, misses≤2, score≥0.50, traj_score≥0.55
-
-### 5.4 运动引导级联检测管线
-
-```
-摄像头 (2560x1440 MJPG @15fps)
-  │
-  v
-[capture_job 线程] 每摄像头
-  |-- 降采样至 1920x1080 灰度
-  |-- absdiff 前帧差分
-  |-- 阈值化 → 静态背景掩码 → 形态学清理
-  |-- 轮廓提取 → 多级滤波管线
-  |     |-- 面积/紧凑度/边缘密度检查
-  |     |-- LCM 局部对比度滤波器
-  |     |-- 灰度噪声/亮斑抑制
-  |     |-- 垂直条带拒绝
-  |     |-- 网格多样性配额
-  |-- 评分排序 ROI (每帧最多6个)
-  |-- 轨迹种子搜索 ROI (最多3个)
-  |-- 创建 640x640 融合画布
-  │
-  v (inf_queues)
-[inference_worker 线程] ── 单 YoloRKNN 实例
-  |-- rknn.inference() 使用全部3核NPU
-  |-- 解码YOLO输出 + NMS
-  │
-  v (res_queues)
-[capture_job 线程] ── 结果处理
-  |-- 坐标映射 + TrajectoryFilter.update()
-  |-- 确认目标 → UDP发送至云台
-  |-- 绘制叠加 → UDP发送视频
 ```
 
 ---
@@ -345,113 +314,31 @@ GRU Backbone: nn.GRU(input_size=8, hidden_size=32, num_layers=1, batch_first=Tru
 | acceleration_x | 帧间X加速度 |
 | acceleration_y | 帧间Y加速度 |
 
-**可选12维版本**: 增加 w_norm, h_norm, aspect_ratio, detector_confidence
-
-### 6.3 输出
-
-- **分类logit**: [B, 1] → sigmoid → UAV概率 (0.0~1.0)
-- **未来偏移**: [B, 5, 2] → 未来5帧相对位置偏移
-
-### 6.4 预训练模型
-
-| 模型 | 路径 | 参数量 | 大小 |
-|------|------|--------|------|
-| 基线模型 | gru detect/models/gru_baseline.pth | ~5K | 0.03MB |
-| 增强模型 | gru detect/models/gru_enhanced.pth | ~25K | 0.17MB |
-
 ---
 
 ## 7. GRU 检测模块 (gru detect)
 
-### 7.1 模块架构
+### 7.1 核心组件
 
-```
-gru detect/
-├── predict_gui.py              # PyQt5 GUI 入口
-├── src/
-│   ├── model.py                # UAVTrajectoryNet 模型定义
-│   ├── inference.py            # InferenceSession 推理会话
-│   ├── tracker.py              # FeatureTracker 多目标追踪器
-│   └── paths.py                # 路径工具函数
-├── models/                     # 预训练模型
-└── outputs/                    # 推理输出
-```
+#### InferenceSession (inference.py, 335行)
 
-### 7.2 核心组件
-
-#### InferenceSession (inference.py, 374行)
-
-管理视频读取、模型推理、视频写入的完整生命周期：
-
-- `_open()`: 初始化模型、视频、追踪器
-- `step()`: 处理单帧，返回渲染结果
-- `_render_frame()`: GRU推理 + 可视化渲染
-- `close()`: 保存输出并清理资源
-
-**特性**:
 - CSV数据驱动模式（含水平镜像校正）
 - 纯视频驱动模式（自动目标检测）
 - ADE（平均位移误差）实时计算
 - 临时文件→验证→原子重命名的崩溃安全写入
 
-#### FeatureTracker (tracker.py, 477行)
-
-**多目标追踪器**，支持：
+#### FeatureTracker (tracker.py, 467行)
 
 - 9步更新管线：检测→预测→匹配→惯性传播→去重→死锁检测→新轨迹创建
 - CSV驱动偏置修正（跳跃门限过滤）
 - 静态背景死锁检测（30/50帧跨度分析）
 - Savitzky-Golay平滑 + 归一化特征提取
 
-### 7.3 启动方式
-
-```bash
-# 方式一：双击启动脚本
-启动UAV预测窗口.vbs
-
-# 方式二：命令行
-conda activate uav_gru
-python predict_gui.py
-```
-
 ---
 
 ## 8. YOLOv5+GRU 集成模块
 
-### 8.1 模块架构
-
-```
-yolov5+GRU/
-├── pipeline.py                 # YoloGRUPipeline 级联管线核心
-├── detector.py                 # 多后端YOLOv5检测器
-│   ├── YoloDetector            # 抽象基类
-│   ├── RKNNImpl                # RK3588 NPU推理
-│   ├── ONNXImpl                # ONNX Runtime推理
-│   ├── PyTorchImpl             # PyTorch推理
-│   └── MockFallbackImpl        # 零模型降级检测
-├── tracker.py                  # 单目标YOLO适配追踪器
-├── model.py                    # GRU模型（副本）
-├── gui_inference.py            # GUI推理会话
-├── predict_gui.py              # 增强版PyQt5 GUI
-├── run.py                      # CLI运行器
-└── test_pipeline.py            # 诊断测试
-```
-
-### 8.2 YoloGRUPipeline 核心管线
-
-**级联检测策略**:
-
-1. **追踪模式**（有历史）: 以last_pos为中心裁剪640x640 ROI → YOLO检测
-2. **全局捕获模式**（无历史）:
-   - 轨A: 全图YOLO检测
-   - 轨B: MockFallback亮点定位 → 256x256 ROI → YOLO精细检测
-
-**处理流程**:
-```
-视频帧 → YOLO检测(ROI/全局) → FeatureTracker关联 → GRU预测 → 渲染输出
-```
-
-### 8.3 多后端检测器
+### 8.1 多后端检测器
 
 | 后端 | 模型格式 | 适用环境 |
 |------|----------|----------|
@@ -460,59 +347,100 @@ yolov5+GRU/
 | PyTorchImpl | .pt/.pth | PyTorch环境 |
 | MockFallbackImpl | 无 | 降级检测 |
 
-**工厂函数** `get_detector()`: 根据模型文件扩展名自动选择后端
+---
 
-### 8.4 增强版GUI (predict_gui.py, 495行)
+## 9. 距离估算模块 (distance model)
 
-**新增功能**:
-- YOLO模型权重选择（.pt/.onnx/.rknn）
-- 置信度阈值滑块（10-90%实时调整）
-- show_box / show_history / show_pred_red_blue 开关
-- 自动扫描yolov5_model/和detect/models/目录
+### 9.1 模块概述
+
+**位置**: `F:\UAV Trajectory System\distance model\`
+**代码行数**: 10,363 行（最大模块，占总代码65.6%）
+**核心理念**: "物理基线 + ML残差修正 + GRU时序精化"
+
+### 9.2 模块结构
+
+```
+distance model/
+├── distance_model_gui.py       # 距离模型可视化GUI (1,699行)
+├── segmentation_mode/          # 分割模式
+│   ├── model.py                # GRU模型定义
+│   ├── tracker.py              # 分割追踪器 (494行)
+│   └── models/
+│       └── gru_enhanced.pth    # 增强模型 (174KB)
+├── yolo_mode/                  # YOLO模式
+│   ├── detector.py             # YOLOv5检测器封装
+│   └── models/
+│       └── best include small.pt # YOLOv5权重 (13.79MB)
+├── src/uav_distance_pipeline/  # 核心管线
+├── tools/                      # 工具脚本
+├── tests/                      # 测试文件 (15个)
+├── train/                      # 完整训练框架
+│   ├── training/               # 训练模块
+│   ├── scripts/                # 入口脚本
+│   ├── configs/                # YAML配置
+│   └── tests/                  # 测试 (10个)
+├── calibration/                # 摄像头标定
+├── dataset/                    # 数据集
+├── exports/                    # 导出数据
+├── input/                      # 输入数据 (run017 + run018, 20,820文件)
+├── models/                     # 训练模型
+└── reports/                    # 分析报告
+```
+
+### 9.3 双模式检测架构
+
+#### segmentation_mode (分割模式)
+
+基于分割结果的轨迹跟踪与预测，使用GRU网络进行轨迹分类和未来位置预测。
+
+#### yolo_mode (YOLO模式)
+
+基于YOLOv5的目标检测与距离估算，支持实时视频流处理。
+
+### 9.4 核心功能
+
+- **Gazebo仿真**: 基于物理引擎的距离数据生成
+- **数据集构建**: 多场景、多距离点的训练数据
+- **MLP/GRU训练**: 距离估算模型训练
+- **质量审计**: 特征泄漏检测、数据集划分验证
+- **GRU输入导出**: 与主GRU模型的接口对接
+- **可视化GUI**: 距离模型可视化界面
+- **双模式推理**: segmentation_mode + yolo_mode
+
+### 9.5 距离范围
+
+| 指标 | 数值 |
+|------|------|
+| 距离范围 | 20m — 500m |
+| 训练数据点 | 1,443 |
+| 场景类型 | 3种 |
+| 物理基线MAE | 0.86mm (仿真) |
+| MLP最终MAE | 0.024mm (仿真) |
 
 ---
 
-## 9. 训练框架模块 (train)
+## 10. 训练框架模块
 
-### 9.1 模块架构
+### 10.1 模块架构
 
 ```
 train/
-├── training/
-│   ├── config/                 # 配置管理 (experiment.py)
+├── training/                   # 训练模块
+│   ├── config/                 # 配置管理
 │   ├── data/                   # 数据层
-│   │   ├── dataset.py          # UAVTrajectoryDataset
-│   │   ├── dataloader.py       # DataLoader封装
-│   │   ├── splitter.py         # 数据集划分
-│   │   ├── negative_generator.py # 负样本合成
-│   │   └── transforms.py       # 数据变换
 │   ├── models/                 # 模型层
-│   │   ├── gru_trajectory.py   # UAVTrajectoryNet
-│   │   └── registry.py         # 模型注册表
 │   ├── losses/                 # 损失函数
-│   │   ├── combined_loss.py    # 分类+回归组合损失
-│   │   └── focal_loss.py       # Focal Loss
 │   ├── trainers/               # 训练器
-│   │   ├── base_trainer.py     # 基类
-│   │   ├── gru_trainer.py      # GRU训练器
-│   │   └── callbacks/          # 回调函数
 │   ├── evaluators/             # 评估器
-│   ├── exporters/              # 模型导出 (ONNX/TorchScript)
+│   ├── exporters/              # 模型导出
 │   └── utils/                  # 工具函数
 ├── scripts/                    # 入口脚本
-│   ├── train.py                # 训练入口
-│   ├── evaluate.py             # 评估入口
-│   └── export_model.py         # 导出入口
 ├── configs/                    # YAML配置
-│   ├── gru_baseline.yaml       # 基线配置
-│   └── gru_enhanced.yaml       # 增强配置
 ├── models/                     # 训练产物
-│   ├── gru_baseline_final.pth  # 基线模型
-│   └── gru_enhanced_final.pth  # 增强模型
 └── tests/                      # 单元测试
 ```
 
-### 9.2 训练配置
+### 10.2 训练配置
 
 #### gru_baseline.yaml
 ```yaml
@@ -532,36 +460,11 @@ training:
   patience: 15
 ```
 
-#### gru_enhanced.yaml
-```yaml
-model:
-  input_dim: 12
-  hidden_dim: 64
-  num_layers: 2
-  future_steps: 5
-  dropout: 0.2
-
-training:
-  batch_size: 32
-  learning_rate: 0.0005
-  epochs: 200
-  patience: 20
-```
-
-### 9.3 训练入口
-
-```bash
-cd train
-python scripts/train.py --config configs/gru_baseline.yaml
-python scripts/evaluate.py --model models/gru_baseline_final.pth --data_dir ../export/input --visualize
-python scripts/export_model.py --model models/gru_baseline_final.pth --format onnx
-```
-
 ---
 
-## 10. 质量分级体系
+## 11. 质量分级体系
 
-### 10.1 四级评定标准
+### 11.1 四级评定标准
 
 | 等级 | 条件 | 说明 |
 |------|------|------|
@@ -572,9 +475,9 @@ python scripts/export_model.py --model models/gru_baseline_final.pth --format on
 
 ---
 
-## 11. 技术栈与依赖
+## 12. 技术栈与依赖
 
-### 11.1 核心依赖
+### 12.1 核心依赖
 
 | 类别 | 库 | 用途 |
 |------|-----|------|
@@ -586,45 +489,64 @@ python scripts/export_model.py --model models/gru_baseline_final.pth --format on
 | 信号处理 | SciPy | Savitzky-Golay平滑 |
 | NPU推理 | rknnlite | RK3588 NPU |
 | 配置 | PyYAML | YAML配置解析 |
+| 机器学习 | scikit-learn | 距离模型训练 |
 
-### 11.2 模型文件清单
+### 12.2 模型文件清单
 
-| 文件 | 大小 | 位置 |
-|------|------|------|
-| gru_baseline.pth | 0.03MB | gru detect/models/ |
-| gru_enhanced.pth | 0.17MB | gru detect/models/ |
-| gru_baseline_final.pth | 0.03MB | train/models/ |
-| gru_enhanced_final.pth | 0.17MB | train/models/ |
-| 训练检查点 | 多个 | train/logs/ |
-
----
-
-## 12. 代码质量分析
-
-### 12.1 代码统计
-
-| 模块 | 文件数 | 总行数 |
-|------|--------|--------|
-| 核心分析 | 2 | 1,282 |
-| YOLOv5边缘端 | 3 | 1,477 |
-| GRU检测 | 5 | 1,424 |
-| YOLOv5+GRU集成 | 8 | 1,608 |
-| 训练框架 | 20+ | 2,000+ |
-| **总计** | **38+** | **~8,000+** |
-
-### 12.2 架构亮点
-
-1. **三份UAVTrajectoryNet**: 相同架构分布在三个模块中，保证导入隔离
-2. **双追踪器实现**: 多目标（477行）vs 单目标（186行），适应不同场景
-3. **级联检测策略**: YOLO全局→Mock降级→ROI精细，确保远距离目标捕获
-4. **崩溃安全写入**: 临时文件→验证→原子重命名
-5. **多后端检测器**: RKNN/ONNX/PyTorch/Mock 自动降级
+| 格式 | 数量 | 总大小 | 说明 |
+|------|------|--------|------|
+| .pth | 11 | 0.84 MB | PyTorch检查点 |
+| .pt | 5 | 41.41 MB | PyTorch模型（含YOLOv5） |
+| .onnx | 2 | 0.04 MB | ONNX导出 |
+| .npz | 2 | 8.95 MB | NumPy模型 |
+| **总计** | **20** | **51.24 MB** | |
 
 ---
 
-## 13. 部署与运维指南
+## 13. 代码质量分析
 
-### 13.1 GRU检测模块部署
+### 13.1 代码统计
+
+| 模块 | 文件数 | 行数 | 占比 |
+|------|--------|------|------|
+| 核心分析 | 2 | 1,142 | 7.2% |
+| YOLOv5边缘端 | 3 | 1,344 | 8.5% |
+| GRU检测 | 5 | 1,319 | 8.3% |
+| YOLOv5+GRU集成 | 8 | 1,499 | 9.5% |
+| 距离估算 | 108 | 10,363 | 65.6% |
+| 其他 | 2 | 131 | 0.8% |
+| **总计** | **128** | **15,798** | **100%** |
+
+### 13.2 最大文件TOP10
+
+| # | 文件 | 行数 |
+|---|------|------|
+| 1 | distance model/distance_model_gui.py | 1,699 |
+| 2 | yolov5_model/main.py | 1,086 |
+| 3 | analyze_episode.py | 861 |
+| 4 | distance model/segmentation_mode/tracker.py | 494 |
+| 5 | gru detect/src/tracker.py | 467 |
+| 6 | yolov5+GRU/predict_gui.py | 444 |
+| 7 | distance model/src/simulation_backend.py | 395 |
+| 8 | gru detect/predict_gui.py | 389 |
+| 9 | distance model/tools/train_distance_model.py | 359 |
+| 10 | distance model/tools/audit_runtime_distance_pipeline.py | 228 |
+
+### 13.3 架构亮点
+
+1. **三份UAVTrajectoryNet**: 相同架构分布在多个模块中，保证导入隔离
+2. **双追踪器实现**: 多目标（467行）vs 单目标（173行），适应不同场景
+3. **四驱检测器**: RKNN/ONNX/PyTorch/Mock 自动降级
+4. **双模式检测**: segmentation_mode + yolo_mode，灵活适配不同场景
+5. **崩溃安全写入**: 临时文件→验证→原子重命名
+6. **物理+ML混合架构**: 距离估算采用物理基线+MLP残差修正+GRU时序精化
+7. **完整测试覆盖**: 距离模块包含25个单元测试
+
+---
+
+## 14. 部署与运维指南
+
+### 14.1 GRU检测模块部署
 
 ```bash
 # 一键配置
@@ -638,57 +560,50 @@ pip install -r requirements.txt
 python predict_gui.py
 ```
 
-### 13.2 YOLOv5+GRU集成模块部署
+### 14.2 YOLOv5+GRU集成模块部署
 
 ```bash
 cd "F:\UAV Trajectory System\yolov5+GRU"
 conda activate uav_gru
-pip install -r ../gru\ detect/requirements.txt
-
-# GUI启动
 python predict_gui.py
-
-# CLI启动
-python run.py --video input.mp4 --output output.avi
 ```
 
-### 13.3 训练模块部署
+### 14.3 距离估算模块部署
 
 ```bash
-cd "F:\UAV Trajectory System\train"
+cd "F:\UAV Trajectory System\distance model"
+conda activate uav_gru
+pip install -r train/requirements.txt
+
+# 启动距离模型GUI
+双击 双击启动测距可视化UI.bat
+
+# 或命令行
+python distance_model_gui.py
+```
+
+### 14.4 训练模块部署
+
+```bash
+cd "F:\UAV Trajectory System\distance model\train"
 pip install -r requirements.txt
-
-# 训练
 python scripts/train.py --config configs/gru_baseline.yaml
-
-# 评估
-python scripts/evaluate.py --model models/gru_baseline_final.pth --data_dir ../export/input
-
-# 导出
-python scripts/export_model.py --model models/gru_baseline_final.pth --format onnx
-```
-
-### 13.4 RK3588边缘端部署
-
-```bash
-cd yolov5_model
-python main.py
 ```
 
 ---
 
-## 14. 改进建议与路线图
+## 15. 改进建议与路线图
 
-### 14.1 短期改进
+### 15.1 短期改进
 
 | 优先级 | 改进项 | 说明 |
 |--------|--------|------|
-| P0 | 统一模型副本 | 三份UAVTrajectoryNet合并为一个共享模块 |
+| P0 | 统一模型副本 | 多份UAVTrajectoryNet合并为共享模块 |
 | P0 | 添加requirements.txt | 项目根目录统一依赖声明 |
 | P1 | 配置外部化 | 硬编码路径提取到配置文件 |
-| P1 | 日志系统 | 添加结构化日志替换print输出 |
+| P1 | 清理中间检查点 | 删除训练中间epoch文件 |
 
-### 14.2 中期改进
+### 15.2 中期改进
 
 | 优先级 | 改进项 | 说明 |
 |--------|--------|------|
@@ -696,7 +611,7 @@ python main.py
 | P2 | 增量学习支持 | 支持新数据微调现有模型 |
 | P2 | Web界面 | 浏览器端实时预览 |
 
-### 14.3 长期路线图
+### 15.3 长期路线图
 
 | 阶段 | 任务 | 预期效果 |
 |------|------|----------|
@@ -726,14 +641,23 @@ python predict_gui.py
 # 选择视频 → 选择YOLO权重 → 选择GRU权重 → 调整置信度 → 点击启动
 ```
 
+### 距离估算
+
+```bash
+conda activate uav_gru
+cd "F:\UAV Trajectory System\distance model"
+python distance_model_gui.py
+# 启动距离模型可视化界面
+```
+
 ### 训练新模型
 
 ```bash
 conda activate uav_gru
-cd "F:\UAV Trajectory System\train"
+cd "F:\UAV Trajectory System\distance model\train"
 python scripts/train.py --config configs/gru_baseline.yaml
 ```
 
 ---
 
-> **文档结束** — 此文档基于对项目全部源码、文档和数据的深度分析自动生成。
+> **文档结束** — 此文档基于对项目全部128个Python源码文件、444个Episode、20个模型文件的深度分析自动生成。

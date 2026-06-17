@@ -1,0 +1,8 @@
+{
+  "status": "pass",
+  "reason": "Normal physical estimation (noisy)",
+  "mean_error_m": 0.0008643334611536325,
+  "std_error_m": 0.00046168805491927055,
+  "min_abs_error_m": 6.599999999679085e-05,
+  "correlation": 0.9999999999999973
+}

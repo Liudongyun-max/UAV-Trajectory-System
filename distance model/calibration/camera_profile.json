@@ -1,0 +1,15 @@
+{
+  "camera_profile": "physical_2k_25mm_imx415_scaled",
+  "width": 2560,
+  "height": 1440,
+  "fps": 25.0,
+  "fx": 11494.25,
+  "fy": 11494.25,
+  "cx": 1280.0,
+  "cy": 720.0,
+  "native_width": 3840,
+  "native_height": 2160,
+  "scaling_ratio": 0.6666667,
+  "target_width_m": 0.3,
+  "target_height_m": 0.15
+}

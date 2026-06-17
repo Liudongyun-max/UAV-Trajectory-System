@@ -1,0 +1,16 @@
+{
+  "mlp_output": {
+    "variable_name": "predicted_residual_m",
+    "physical_meaning": "MLP误差校正残差值",
+    "unit": "meter (米)",
+    "range": "[-100.0, 100.0]",
+    "mathematical_formula": "raw_predicted_range_m = fused_range_val + predicted_residual_m"
+  },
+  "gru_output": {
+    "variable_name": "stable_pred_val",
+    "physical_meaning": "GRU时序滤波预测绝对测距值",
+    "unit": "meter (米)",
+    "range": "[0.0, 500.0]",
+    "mathematical_formula": "last_pred = gru_model(normalized_sequence)[:, -1, 0]"
+  }
+}
