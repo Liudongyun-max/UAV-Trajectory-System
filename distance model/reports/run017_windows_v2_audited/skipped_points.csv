@@ -1,2 +1,0 @@
-point_id,session_id,nominal_distance_m,quality_grade,valid_frames,skip_reason
-point_d369_flat_ground_light_wind_rep01,session_flat_ground_light_wind_d365-d369_070,369,C,114,low_valid_frames: 114
